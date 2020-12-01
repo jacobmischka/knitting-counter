@@ -14,6 +14,9 @@ ufmt = "0.1.0"
 [dependencies.arduino-uno]
 git = "https://github.com/Rahix/avr-hal"
 
+[dependencies.atmega328p-hal]
+git = "https://github.com/Rahix/avr-hal"
+
 [profile.dev]
 panic = "abort"
 lto = true

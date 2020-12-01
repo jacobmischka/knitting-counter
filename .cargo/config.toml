@@ -5,5 +5,4 @@ target = "avr-atmega328p.json"
 build-std = ["core"]
 
 [target.'cfg(target_arch = "avr")']
-# runner = "uno-runner.sh"
 runner = "qemu-system-avr -machine uno -nographic -bios"

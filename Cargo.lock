@@ -85,6 +85,7 @@ name = "knitting-counter"
 version = "0.1.0"
 dependencies = [
  "arduino-uno",
+ "atmega328p-hal",
  "nb 0.1.3",
  "panic-halt",
  "ufmt",

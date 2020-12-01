@@ -3,9 +3,55 @@
 
 use panic_halt as _;
 
-use arduino_uno::prelude::*;
+use arduino_uno::{
+    hal::port::{mode::Output, portb::PB5},
+    prelude::*,
+};
+use atmega328p_hal::port::{mode, Pin};
 use ufmt::{derive::uDebug, uwriteln};
 
+#[arduino_uno::entry]
+fn main() -> ! {
+    let peripherals = arduino_uno::Peripherals::take().unwrap();
+
+    let mut pins = arduino_uno::Pins::new(peripherals.PORTB, peripherals.PORTC, peripherals.PORTD);
+    let mut led = pins.d13.into_output(&mut pins.ddr);
+
+    let mut serial = arduino_uno::Serial::new(
+        peripherals.USART0,
+        pins.d0,
+        pins.d1.into_output(&mut pins.ddr),
+        57600.into_baudrate(),
+    );
+
+    uwriteln!(&mut serial, "Hello, Arduino!").void_unwrap();
+
+    let mut rows = [
+        pins.d2.into_output(&mut pins.ddr).downgrade(),
+        pins.d3.into_output(&mut pins.ddr).downgrade(),
+        pins.d4.into_output(&mut pins.ddr).downgrade(),
+        pins.d5.into_output(&mut pins.ddr).downgrade(),
+    ];
+    let cols = [
+        pins.d6.into_pull_up_input(&pins.ddr).downgrade(),
+        pins.d7.into_pull_up_input(&pins.ddr).downgrade(),
+        pins.d8.into_pull_up_input(&pins.ddr).downgrade(),
+        pins.d9.into_pull_up_input(&pins.ddr).downgrade(),
+    ];
+
+    let mut debouncer = Debouncer::new();
+
+    loop {
+        if let Some(input) = debouncer.debounce(Input::from_pins(&mut rows, &cols)) {
+            uwriteln!(&mut serial, "Input: {:?}", input).void_unwrap();
+            led.set_high().void_unwrap();
+        } else {
+            led.set_low().void_unwrap();
+        }
+    }
+}
+
+/*
 #[arduino_uno::entry]
 fn main() -> ! {
     let peripherals = arduino_uno::Peripherals::take().unwrap();
@@ -34,6 +80,14 @@ fn main() -> ! {
         } else {
             uwriteln!(&mut serial, "Invalid input\r").void_unwrap();
         }
+    }
+}
+*/
+
+fn sutter_blink(led: &mut PB5<Output>, times: usize) {
+    for i in (0..times).map(|i| i * 10) {
+        led.toggle().void_unwrap();
+        arduino_uno::delay_ms(i as u16);
     }
 }
 
@@ -177,7 +231,26 @@ impl Counter {
     }
 }
 
-#[derive(Debug, Copy, Clone, uDebug)]
+struct Debouncer {
+    last_input: Option<Input>,
+}
+
+impl Debouncer {
+    fn new() -> Debouncer {
+        Debouncer { last_input: None }
+    }
+
+    fn debounce(&mut self, input: Option<Input>) -> Option<Input> {
+        if input != self.last_input {
+            self.last_input = input;
+            input
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, uDebug)]
 enum Input {
     Num0,
     Num1,
@@ -197,7 +270,50 @@ enum Input {
     D,
 }
 
+const NUM_ROWS: usize = 4;
+const NUM_COLS: usize = 4;
+
 impl Input {
+    fn from_pins(
+        rows: &mut [Pin<mode::Output>],
+        cols: &[Pin<mode::Input<mode::PullUp>>],
+    ) -> Option<Input> {
+        for row in rows.iter_mut() {
+            row.set_high().void_unwrap();
+        }
+
+        for i in 0..NUM_ROWS {
+            rows[i].set_low().void_unwrap();
+            for j in 0..NUM_COLS {
+                if cols[j].is_low().void_unwrap() {
+                    rows[i].set_high().void_unwrap();
+                    match (i, j) {
+                        (2, 3) => return Some(Input::Num1),
+                        (2, 2) => return Some(Input::Num4),
+                        (2, 1) => return Some(Input::Num7),
+                        (2, 0) => return Some(Input::Star),
+                        (3, 3) => return Some(Input::Num2),
+                        (3, 2) => return Some(Input::Num5),
+                        (3, 1) => return Some(Input::Num8),
+                        (3, 0) => return Some(Input::Num0),
+                        (1, 3) => return Some(Input::Num3),
+                        (1, 2) => return Some(Input::Num6),
+                        (1, 1) => return Some(Input::Num9),
+                        (1, 0) => return Some(Input::Hash),
+                        (0, 3) => return Some(Input::A),
+                        (0, 2) => return Some(Input::B),
+                        (0, 1) => return Some(Input::C),
+                        (0, 0) => return Some(Input::D),
+                        _ => panic!("Invalid key index ({}, {})", i, j),
+                    }
+                }
+            }
+            rows[i].set_high().void_unwrap();
+        }
+
+        None
+    }
+
     fn from_serial(byte: u8) -> Option<Input> {
         use Input::*;
 
