@@ -3,12 +3,21 @@
 
 use panic_halt as _;
 
-use arduino_uno::{
-    hal::port::{mode::Output, portb::PB5},
-    prelude::*,
-};
+use arduino_uno::{prelude::*, Delay};
 use atmega328p_hal::port::{mode, Pin};
-use ufmt::{derive::uDebug, uwriteln};
+use hd44780_driver::{self as lcd_driver, bus::I2CBus, HD44780};
+
+mod display_props {
+    pub const DISPLAY_ADDRESS: u8 = 0x27;
+
+    pub const SCREEN_WIDTH: u8 = 16;
+    pub const LINE_WIDTH: u8 = 64;
+    pub const BOTTOM_RIGHT: u8 = LINE_WIDTH + SCREEN_WIDTH - 1;
+
+    pub const COUNTER_START: u8 = 6;
+}
+
+use display_props::*;
 
 #[arduino_uno::entry]
 fn main() -> ! {
@@ -24,7 +33,22 @@ fn main() -> ! {
         57600.into_baudrate(),
     );
 
-    uwriteln!(&mut serial, "Hello, Arduino!").void_unwrap();
+    let mut delay = Delay::new();
+
+    let mut lcd = HD44780::new_i2c(
+        arduino_uno::I2cMaster::new(
+            peripherals.TWI,
+            pins.a4.into_pull_up_input(&mut pins.ddr),
+            pins.a5.into_pull_up_input(&mut pins.ddr),
+            50000,
+        ),
+        DISPLAY_ADDRESS,
+        &mut delay,
+    )
+    .unwrap();
+
+    lcd.set_cursor_visibility(lcd_driver::Cursor::Invisible, &mut delay)
+        .unwrap();
 
     let mut rows = [
         pins.d2.into_output(&mut pins.ddr).downgrade(),
@@ -41,68 +65,42 @@ fn main() -> ! {
 
     let mut debouncer = Debouncer::new();
 
+    let mut state = State::new();
+    state.update_display(&mut lcd, &mut delay).unwrap();
+
     loop {
         if let Some(input) = debouncer.debounce(Input::from_pins(&mut rows, &cols)) {
-            uwriteln!(&mut serial, "Input: {:?}", input).void_unwrap();
-            led.set_high().void_unwrap();
-        } else {
-            led.set_low().void_unwrap();
-        }
-    }
-}
-
-/*
-#[arduino_uno::entry]
-fn main() -> ! {
-    let peripherals = arduino_uno::Peripherals::take().unwrap();
-
-    let mut pins = arduino_uno::Pins::new(peripherals.PORTB, peripherals.PORTC, peripherals.PORTD);
-
-    let mut serial = arduino_uno::Serial::new(
-        peripherals.USART0,
-        pins.d0,
-        pins.d1.into_output(&mut pins.ddr),
-        57600.into_baudrate(),
-    );
-
-    let mut state = State::new();
-
-    uwriteln!(&mut serial, "State: {:#?}\r", &state).void_unwrap();
-
-    loop {
-        let b = nb::block!(serial.read()).void_unwrap();
-        let input = Input::from_serial(b);
-
-        if let Some(input) = input {
             state.handle_input(input);
-
-            uwriteln!(&mut serial, "State: {:#?}\r", &state).void_unwrap();
-        } else {
-            uwriteln!(&mut serial, "Invalid input\r").void_unwrap();
+            state.update_display(&mut lcd, &mut delay).unwrap();
         }
     }
 }
-*/
 
-fn sutter_blink(led: &mut PB5<Output>, times: usize) {
-    for i in (0..times).map(|i| i * 10) {
-        led.toggle().void_unwrap();
-        arduino_uno::delay_ms(i as u16);
-    }
-}
-
-#[derive(Debug, Copy, Clone, uDebug)]
+#[derive(Debug, Copy, Clone)]
 enum Mode {
     Normal,
     Input,
+    ConfirmReset,
 }
 
-#[derive(Debug, Clone, uDebug)]
+impl Mode {
+    fn to_str(&self) -> &'static str {
+        use Mode::*;
+
+        match self {
+            Normal => "Normal",
+            Input => "Input",
+            ConfirmReset => "Confirm",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 struct State {
     mode: Mode,
     counters: Counters,
     selected_counter: CounterSelection,
-    digits: Option<Digits>,
+    digits_input: Option<DigitsInput>,
 }
 
 impl State {
@@ -111,8 +109,22 @@ impl State {
             mode: Mode::Normal,
             counters: Default::default(),
             selected_counter: CounterSelection::A,
-            digits: None,
+            digits_input: None,
         }
+    }
+
+    fn change_mode(&mut self, mode: Mode) {
+        match mode {
+            Mode::Input => {
+                let counter_val = self.get_counter().val();
+                self.digits_input = Some(DigitsInput::new(counter_val));
+            }
+            Mode::Normal => {
+                self.digits_input = None;
+            }
+            Mode::ConfirmReset => {}
+        }
+        self.mode = mode;
     }
 
     fn get_counter(&self) -> &Counter {
@@ -127,7 +139,7 @@ impl State {
         match self.mode {
             Mode::Normal => match input {
                 Input::Num0 => {
-                    self.get_counter_mut().reset();
+                    self.change_mode(Mode::ConfirmReset);
                 }
                 Input::Num1 => {}
                 Input::Num2 => {}
@@ -144,33 +156,112 @@ impl State {
                 Input::Hash => {
                     self.get_counter_mut().inc();
                 }
-                Input::A => {
-                    self.selected_counter = CounterSelection::A;
-                }
-                Input::B => {
-                    self.selected_counter = CounterSelection::B;
-                }
-                Input::C => {
-                    self.selected_counter = CounterSelection::C;
-                }
-                Input::D => {
-                    self.selected_counter = CounterSelection::D;
+                Input::A | Input::B | Input::C | Input::D => {
+                    let counter = CounterSelection::from_input(&input).unwrap();
+                    if self.selected_counter == counter {
+                        self.change_mode(Mode::Input);
+                    } else {
+                        self.selected_counter = counter;
+                    }
                 }
             },
             Mode::Input => {
-                // TODO
+                if let Some(digits) = self.digits_input.as_mut() {
+                    match input {
+                        Input::Star => {
+                            if digits.index == 0 {
+                                digits.index = BUF_LEN
+                            }
 
-                if let Some(digits) = &mut self.digits {
-                    if let Some(digit) = input.to_digit() {
-                        digits.add_digit(digit);
+                            digits.index -= 1;
+                        }
+                        Input::Hash => {
+                            digits.index = (digits.index + 1) % BUF_LEN;
+                        }
+                        x => {
+                            if let Some(digit) = x.to_digit() {
+                                digits.add_digit(digit);
+                            } else if let Some(counter_selection) = CounterSelection::from_input(&x)
+                            {
+                                if self.selected_counter == counter_selection {
+                                    let new_val = digits.parse();
+                                    self.get_counter_mut().set(new_val);
+                                }
+
+                                self.change_mode(Mode::Normal);
+                            }
+                        }
                     }
                 }
             }
+            Mode::ConfirmReset => match input {
+                Input::Star => {
+                    self.change_mode(Mode::Normal);
+                }
+                Input::Hash => {
+                    self.get_counter_mut().reset();
+                    self.change_mode(Mode::Normal);
+                }
+                _ => {}
+            },
         }
+    }
+
+    fn update_display<I2C, D>(
+        &self,
+        lcd: &mut HD44780<I2CBus<I2C>>,
+        delay: &mut D,
+    ) -> lcd_driver::error::Result<()>
+    where
+        I2C: embedded_hal::blocking::i2c::Write,
+        D: embedded_hal::blocking::delay::DelayUs<u16> + embedded_hal::blocking::delay::DelayMs<u8>,
+    {
+        lcd.clear(delay)?;
+        lcd.reset(delay)?;
+        match self.mode {
+            Mode::Normal => {
+                lcd.set_cursor_visibility(lcd_driver::Cursor::Invisible, delay)?;
+                lcd.set_cursor_pos(COUNTER_START, delay)?;
+                for c in &self.get_counter().to_digits().to_chars() {
+                    if let Some(c) = c {
+                        lcd.write_char(*c, delay)?;
+                    } else {
+                        lcd.shift_cursor(lcd_driver::Direction::Right, delay)?;
+                    }
+                }
+            }
+            Mode::Input => {
+                lcd.set_cursor_pos(COUNTER_START, delay)?;
+                if let Some(digits_input) = &self.digits_input {
+                    for c in &digits_input.buf.to_chars() {
+                        if let Some(c) = c {
+                            lcd.write_char(*c, delay)?;
+                        } else {
+                            lcd.write_char('0', delay)?;
+                        }
+                    }
+                    lcd.set_cursor_pos(
+                        LINE_WIDTH + COUNTER_START + digits_input.index as u8,
+                        delay,
+                    )?;
+                    lcd.write_char('^', delay)?;
+                }
+            }
+            Mode::ConfirmReset => {
+                lcd.write_str("Clear counter?", delay)?;
+                lcd.set_cursor_pos(LINE_WIDTH, delay)?;
+                lcd.write_str("*: No  #: Yes", delay)?;
+            }
+        }
+
+        lcd.set_cursor_pos(BOTTOM_RIGHT, delay)?;
+        lcd.write_char(self.selected_counter.to_char(), delay)?;
+
+        Ok(())
     }
 }
 
-#[derive(Debug, Copy, Clone, uDebug)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum CounterSelection {
     A,
     B,
@@ -178,7 +269,28 @@ enum CounterSelection {
     D,
 }
 
-#[derive(Debug, Clone, Default, uDebug)]
+impl CounterSelection {
+    fn to_char(&self) -> char {
+        match self {
+            CounterSelection::A => 'A',
+            CounterSelection::B => 'B',
+            CounterSelection::C => 'C',
+            CounterSelection::D => 'D',
+        }
+    }
+
+    fn from_input(input: &Input) -> Option<CounterSelection> {
+        match input {
+            Input::A => Some(CounterSelection::A),
+            Input::B => Some(CounterSelection::B),
+            Input::C => Some(CounterSelection::C),
+            Input::D => Some(CounterSelection::D),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
 struct Counters {
     a: Counter,
     b: Counter,
@@ -206,9 +318,9 @@ impl Counters {
     }
 }
 
-#[derive(Debug, Clone, Default, uDebug)]
+#[derive(Debug, Clone, Default)]
 struct Counter {
-    val: usize,
+    val: u16,
 }
 
 impl Counter {
@@ -216,18 +328,34 @@ impl Counter {
         Counter::default()
     }
 
+    fn val(&self) -> u16 {
+        self.val
+    }
+
     fn inc(&mut self) {
-        self.val += 1;
+        self.val = self.val.wrapping_add(1);
     }
 
     fn dec(&mut self) {
-        if self.val > 0 {
-            self.val -= 1;
-        }
+        self.val = self.val.wrapping_sub(1);
+    }
+
+    fn set(&mut self, val: u16) {
+        self.val = val;
     }
 
     fn reset(&mut self) {
         self.val = 0;
+    }
+
+    fn to_digits(&self) -> Digits {
+        Digits([
+            ((self.val / 10000) % 10) as u8,
+            ((self.val / 1000) % 10) as u8,
+            ((self.val / 100) % 10) as u8,
+            ((self.val / 10) % 10) as u8,
+            (self.val % 10) as u8,
+        ])
     }
 }
 
@@ -250,7 +378,7 @@ impl Debouncer {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, uDebug)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum Input {
     Num0,
     Num1,
@@ -355,29 +483,68 @@ impl Input {
     }
 }
 
-const BUF_LEN: usize = 6;
+const BUF_LEN: usize = 5;
 
-#[derive(Debug, Clone, uDebug)]
-struct Digits {
-    buf: [u8; BUF_LEN],
+#[derive(Debug, Clone, Default)]
+struct Digits([u8; BUF_LEN]);
+
+impl Digits {
+    fn from_u16(val: u16) -> Digits {
+        let mut buf = [0u8; BUF_LEN];
+        for i in 0..BUF_LEN {
+            let index = BUF_LEN - 1 - i;
+            buf[index] = ((val / 10u16.pow(i as _)) % 10) as u8;
+        }
+
+        Digits(buf)
+    }
+
+    fn to_u16(&self) -> u16 {
+        self.0.iter().rev().enumerate().fold(0u16, |acc, (i, val)| {
+            acc.saturating_add((*val as u16) * 10u16.pow(i as _))
+        }) as _
+    }
+
+    fn to_chars(&self) -> [Option<char>; BUF_LEN] {
+        let mut leading = true;
+        let mut chars = [None; BUF_LEN];
+        for (i, digit) in self.0.iter().enumerate() {
+            if i < chars.len() - 1 && leading && *digit == 0 {
+                continue;
+            } else {
+                leading = false;
+                chars[i] = core::char::from_digit(*digit as _, 10);
+            }
+        }
+
+        chars
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct DigitsInput {
+    buf: Digits,
     index: usize,
 }
 
-impl Digits {
-    fn add_digit(&mut self, digit: u8) {
-        if self.index < BUF_LEN {
-            self.buf[self.index] = digit;
-            self.index += 1;
+impl DigitsInput {
+    fn new(val: u16) -> Self {
+        DigitsInput {
+            buf: Digits::from_u16(val),
+            index: 0,
         }
     }
 
-    fn parse(&self) -> usize {
-        self.buf
-            .iter()
-            .rev()
-            .enumerate()
-            .fold(0u16, |acc, (i, val)| {
-                acc + (*val as u16) * 10u16.pow(i as _)
-            }) as _
+    fn add_digit(&mut self, digit: u8) {
+        if self.index == 0 && digit > 6 {
+            // Do nothing, out of bounds
+        } else {
+            self.buf.0[self.index] = digit;
+            self.index = (self.index + 1) % BUF_LEN;
+        }
+    }
+
+    fn parse(&self) -> u16 {
+        self.buf.to_u16()
     }
 }
