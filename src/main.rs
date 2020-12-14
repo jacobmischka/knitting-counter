@@ -3,7 +3,7 @@
 
 use panic_halt as _;
 
-use arduino_uno::{prelude::*, Delay};
+use arduino_uno::{pac::EEPROM, prelude::*, Delay};
 use atmega328p_hal::port::{mode, Pin};
 use hd44780_driver::{self as lcd_driver, bus::I2CBus, HD44780};
 
@@ -17,21 +17,15 @@ mod display_props {
     pub const COUNTER_START: u8 = 6;
 }
 
+mod eeprom;
+
 use display_props::*;
+use eeprom::Storable;
 
 #[arduino_uno::entry]
 fn main() -> ! {
     let peripherals = arduino_uno::Peripherals::take().unwrap();
-
     let mut pins = arduino_uno::Pins::new(peripherals.PORTB, peripherals.PORTC, peripherals.PORTD);
-    let mut led = pins.d13.into_output(&mut pins.ddr);
-
-    let mut serial = arduino_uno::Serial::new(
-        peripherals.USART0,
-        pins.d0,
-        pins.d1.into_output(&mut pins.ddr),
-        57600.into_baudrate(),
-    );
 
     let mut delay = Delay::new();
 
@@ -46,7 +40,6 @@ fn main() -> ! {
         &mut delay,
     )
     .unwrap();
-
     lcd.set_cursor_visibility(lcd_driver::Cursor::Invisible, &mut delay)
         .unwrap();
 
@@ -70,32 +63,30 @@ fn main() -> ! {
 
     loop {
         if let Some(input) = debouncer.debounce(Input::from_pins(&mut rows, &cols)) {
+            if state.mode == Mode::Normal && input == Input::Num5 {
+                state.store(&EEPROM::ptr(), 0);
+            }
+
             state.handle_input(input);
             state.update_display(&mut lcd, &mut delay).unwrap();
         }
     }
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum Mode {
     Normal,
     Input,
     ConfirmReset,
 }
 
-impl Mode {
-    fn to_str(&self) -> &'static str {
-        use Mode::*;
-
-        match self {
-            Normal => "Normal",
-            Input => "Input",
-            ConfirmReset => "Confirm",
-        }
+impl Default for Mode {
+    fn default() -> Self {
+        Mode::Normal
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct State {
     mode: Mode,
     counters: Counters,
@@ -269,6 +260,12 @@ enum CounterSelection {
     D,
 }
 
+impl Default for CounterSelection {
+    fn default() -> Self {
+        CounterSelection::A
+    }
+}
+
 impl CounterSelection {
     fn to_char(&self) -> char {
         match self {
@@ -324,8 +321,8 @@ struct Counter {
 }
 
 impl Counter {
-    fn new() -> Counter {
-        Counter::default()
+    fn new(val: u16) -> Counter {
+        Counter { val }
     }
 
     fn val(&self) -> u16 {
@@ -442,6 +439,7 @@ impl Input {
         None
     }
 
+    #[allow(dead_code)]
     fn from_serial(byte: u8) -> Option<Input> {
         use Input::*;
 
