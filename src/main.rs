@@ -96,7 +96,6 @@ struct State {
     counters: Counters,
     selected_counter: CounterSelection,
     digits_input: Option<DigitsInput>,
-    dirty: bool,
 }
 
 impl State {
@@ -106,7 +105,6 @@ impl State {
             counters: Default::default(),
             selected_counter: CounterSelection::A,
             digits_input: None,
-            dirty: false,
         }
     }
 
@@ -145,7 +143,6 @@ impl State {
                 Input::Num5 => {
                     avr_device::interrupt::free(|_| {
                         self.store(&EEPROM::ptr(), STATE_STORAGE_ADDRESS);
-                        self.dirty = false;
                     });
                 }
                 Input::Num6 => {}
@@ -154,11 +151,9 @@ impl State {
                 Input::Num9 => {}
                 Input::Star => {
                     self.get_counter_mut().dec();
-                    self.dirty = true;
                 }
                 Input::Hash => {
                     self.get_counter_mut().inc();
-                    self.dirty = true;
                 }
                 Input::A | Input::B | Input::C | Input::D => {
                     let counter = CounterSelection::from_input(&input).unwrap();
@@ -190,7 +185,6 @@ impl State {
                                 if self.selected_counter == counter_selection {
                                     let new_val = digits.parse();
                                     self.get_counter_mut().set(new_val);
-                                    self.dirty = true;
                                 }
 
                                 self.change_mode(Mode::Normal);
@@ -205,7 +199,6 @@ impl State {
                 }
                 Input::Hash => {
                     self.get_counter_mut().reset();
-                    self.dirty = true;
                     self.change_mode(Mode::Normal);
                 }
                 _ => {}
@@ -259,7 +252,7 @@ impl State {
             }
         }
 
-        if !self.dirty {
+        if !self.get_counter().is_dirty() {
             lcd.set_cursor_pos(DIRTY_STATE, delay).unwrap();
             lcd.write_str("Saved", delay).unwrap();
         }
@@ -337,11 +330,20 @@ impl Counters {
 #[derive(Debug, Clone, Default)]
 struct Counter {
     val: u16,
+    dirty: bool,
 }
 
 impl Counter {
     fn new(val: u16) -> Counter {
-        Counter { val }
+        Counter { val, dirty: false }
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    fn clean(&mut self) {
+        self.dirty = false;
     }
 
     fn val(&self) -> u16 {
@@ -350,18 +352,22 @@ impl Counter {
 
     fn inc(&mut self) {
         self.val = self.val.wrapping_add(1);
+        self.dirty = true;
     }
 
     fn dec(&mut self) {
         self.val = self.val.wrapping_sub(1);
+        self.dirty = true;
     }
 
     fn set(&mut self, val: u16) {
         self.val = val;
+        self.dirty = true;
     }
 
     fn reset(&mut self) {
         self.val = 0;
+        self.dirty = true;
     }
 
     fn to_digits(&self) -> Digits {
