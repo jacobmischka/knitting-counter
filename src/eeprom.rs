@@ -1,6 +1,6 @@
 /// Based on information from
 /// https://cse537-2011.blogspot.com/2011/02/accessing-internal-eeprom-on-atmega328p.html
-use arduino_uno::pac::eeprom::RegisterBlock;
+use arduino_uno::pac::eeprom::{eecr::EEPM_A, RegisterBlock};
 
 use super::{Counter, Counters, State};
 
@@ -23,23 +23,19 @@ pub trait Storage {
 impl Storage for *const RegisterBlock {
     fn write_byte(&self, addr: u16, data: u8) {
         let block = unsafe { &**self };
-
         while block.eecr.read().eepe().bit_is_set() {
             // Wait out any previous write
         }
 
-        block.eear.write(|w| unsafe {
-            w.bits(addr);
-            w
-        });
-        block.eedr.write(|w| unsafe {
-            w.bits(data);
-            w
-        });
+        block.eear.write(|w| unsafe { w.bits(addr) });
+        block.eedr.write(|w| unsafe { w.bits(data) });
         block.eecr.write(|w| {
-            w.eempe().set_bit();
-            w.eepe().set_bit();
-            w
+            w.eepm()
+                .variant(EEPM_A::VAL_0X00) // Erase and write
+                .eempe()
+                .set_bit()
+                .eepe()
+                .set_bit()
         });
     }
 
@@ -49,14 +45,8 @@ impl Storage for *const RegisterBlock {
             // Wait out any previous write
         }
 
-        block.eear.write(|w| unsafe {
-            w.bits(addr);
-            w
-        });
-        block.eecr.write(|w| {
-            w.eere().set_bit();
-            w
-        });
+        block.eear.write(|w| unsafe { w.bits(addr) });
+        block.eecr.write(|w| w.eere().set_bit());
         block.eedr.read().bits()
     }
 }

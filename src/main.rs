@@ -15,9 +15,13 @@ mod display_props {
     pub const BOTTOM_RIGHT: u8 = LINE_WIDTH + SCREEN_WIDTH - 1;
 
     pub const COUNTER_START: u8 = 6;
+    pub const SELECTED_COUNTER: u8 = BOTTOM_RIGHT;
+    pub const DIRTY_STATE: u8 = LINE_WIDTH;
 }
 
 mod eeprom;
+
+const STATE_STORAGE_ADDRESS: u16 = 1337;
 
 use display_props::*;
 use eeprom::Storable;
@@ -59,14 +63,14 @@ fn main() -> ! {
     let mut debouncer = Debouncer::new();
 
     let mut state = State::new();
+    avr_device::interrupt::free(|_| {
+        state = State::load(&EEPROM::ptr(), STATE_STORAGE_ADDRESS);
+    });
+
     state.update_display(&mut lcd, &mut delay).unwrap();
 
     loop {
         if let Some(input) = debouncer.debounce(Input::from_pins(&mut rows, &cols)) {
-            if state.mode == Mode::Normal && input == Input::Num5 {
-                state.store(&EEPROM::ptr(), 0);
-            }
-
             state.handle_input(input);
             state.update_display(&mut lcd, &mut delay).unwrap();
         }
@@ -92,6 +96,7 @@ struct State {
     counters: Counters,
     selected_counter: CounterSelection,
     digits_input: Option<DigitsInput>,
+    dirty: bool,
 }
 
 impl State {
@@ -101,6 +106,7 @@ impl State {
             counters: Default::default(),
             selected_counter: CounterSelection::A,
             digits_input: None,
+            dirty: false,
         }
     }
 
@@ -136,16 +142,23 @@ impl State {
                 Input::Num2 => {}
                 Input::Num3 => {}
                 Input::Num4 => {}
-                Input::Num5 => {}
+                Input::Num5 => {
+                    avr_device::interrupt::free(|_| {
+                        self.store(&EEPROM::ptr(), STATE_STORAGE_ADDRESS);
+                        self.dirty = false;
+                    });
+                }
                 Input::Num6 => {}
                 Input::Num7 => {}
                 Input::Num8 => {}
                 Input::Num9 => {}
                 Input::Star => {
                     self.get_counter_mut().dec();
+                    self.dirty = true;
                 }
                 Input::Hash => {
                     self.get_counter_mut().inc();
+                    self.dirty = true;
                 }
                 Input::A | Input::B | Input::C | Input::D => {
                     let counter = CounterSelection::from_input(&input).unwrap();
@@ -177,6 +190,7 @@ impl State {
                                 if self.selected_counter == counter_selection {
                                     let new_val = digits.parse();
                                     self.get_counter_mut().set(new_val);
+                                    self.dirty = true;
                                 }
 
                                 self.change_mode(Mode::Normal);
@@ -191,6 +205,7 @@ impl State {
                 }
                 Input::Hash => {
                     self.get_counter_mut().reset();
+                    self.dirty = true;
                     self.change_mode(Mode::Normal);
                 }
                 _ => {}
@@ -211,7 +226,6 @@ impl State {
         lcd.reset(delay)?;
         match self.mode {
             Mode::Normal => {
-                lcd.set_cursor_visibility(lcd_driver::Cursor::Invisible, delay)?;
                 lcd.set_cursor_pos(COUNTER_START, delay)?;
                 for c in &self.get_counter().to_digits().to_chars() {
                     if let Some(c) = c {
@@ -245,7 +259,12 @@ impl State {
             }
         }
 
-        lcd.set_cursor_pos(BOTTOM_RIGHT, delay)?;
+        if !self.dirty {
+            lcd.set_cursor_pos(DIRTY_STATE, delay).unwrap();
+            lcd.write_str("Saved", delay).unwrap();
+        }
+
+        lcd.set_cursor_pos(SELECTED_COUNTER, delay)?;
         lcd.write_char(self.selected_counter.to_char(), delay)?;
 
         Ok(())

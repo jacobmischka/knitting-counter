@@ -95,6 +95,7 @@ version = "0.1.0"
 dependencies = [
  "arduino-uno",
  "atmega328p-hal",
+ "avr-device",
  "embedded-hal",
  "hd44780-driver",
  "nb 0.1.3",
