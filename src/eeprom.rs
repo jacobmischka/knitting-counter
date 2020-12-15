@@ -22,6 +22,10 @@ pub trait Storage {
 
 impl Storage for *const RegisterBlock {
     fn write_byte(&self, addr: u16, data: u8) {
+        if self.read_byte(addr) == data {
+            return;
+        }
+
         let block = unsafe { &**self };
         while block.eecr.read().eepe().bit_is_set() {
             // Wait out any previous write
