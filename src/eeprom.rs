@@ -38,9 +38,8 @@ impl Storage for *const RegisterBlock {
                 .variant(EEPM_A::VAL_0X00) // Erase and write
                 .eempe()
                 .set_bit()
-                .eepe()
-                .set_bit()
         });
+        block.eecr.write(|w| w.eepe().set_bit());
     }
 
     fn read_byte(&self, addr: u16) -> u8 {
