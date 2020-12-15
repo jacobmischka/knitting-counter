@@ -66,7 +66,9 @@ impl Storable for Counter {
     fn load<S: Storage>(storage: &S, addr: u16) -> Self {
         let mut buf = [0; 2];
         storage.read_bytes(addr, 2, &mut buf);
-        Counter::new(u16::from_le_bytes(buf))
+        let val = u16::from_le_bytes(buf);
+        // If MAX (EEPROM unset) initialize to 0
+        Counter::new(if val == u16::MAX { 0 } else { val })
     }
 }
 

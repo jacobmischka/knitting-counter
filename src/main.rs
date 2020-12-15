@@ -143,6 +143,7 @@ impl State {
                 Input::Num5 => {
                     avr_device::interrupt::free(|_| {
                         self.store(&EEPROM::ptr(), STATE_STORAGE_ADDRESS);
+                        self.counters.clean();
                     });
                 }
                 Input::Num6 => {}
@@ -324,6 +325,17 @@ impl Counters {
             CounterSelection::C => &mut self.c,
             CounterSelection::D => &mut self.d,
         }
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.a.is_dirty() || self.b.is_dirty() || self.c.is_dirty() || self.d.is_dirty()
+    }
+
+    fn clean(&mut self) {
+        self.a.clean();
+        self.b.clean();
+        self.c.clean();
+        self.d.clean();
     }
 }
 
