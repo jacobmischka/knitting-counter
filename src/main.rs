@@ -228,6 +228,11 @@ impl State {
                         lcd.shift_cursor(lcd_driver::Direction::Right, delay)?;
                     }
                 }
+
+                if !self.get_counter().is_dirty() {
+                    lcd.set_cursor_pos(DIRTY_STATE, delay).unwrap();
+                    lcd.write_str("Saved", delay).unwrap();
+                }
             }
             Mode::Input => {
                 lcd.set_cursor_pos(COUNTER_START, delay)?;
@@ -251,11 +256,6 @@ impl State {
                 lcd.set_cursor_pos(LINE_WIDTH, delay)?;
                 lcd.write_str("*: No  #: Yes", delay)?;
             }
-        }
-
-        if !self.get_counter().is_dirty() {
-            lcd.set_cursor_pos(DIRTY_STATE, delay).unwrap();
-            lcd.write_str("Saved", delay).unwrap();
         }
 
         lcd.set_cursor_pos(SELECTED_COUNTER, delay)?;
